@@ -45,7 +45,7 @@
   },
   "scripts": {
     "debug": "node debug app.js",
-    "start": "sudo NODE_ENV=production pm2 start app.js --log-date-format 'DD-MM HH:mm:ss.SSS' --name reviveApp V2 Server"
+    "start": "sudo NODE_ENV=production pm2 start app.js --log-date-format 'DD-MM HH:mm:ss.SSS' --name 'reviveApp V2 Server' --watch"
   },
   "main": "app.js",
   "repository": {
