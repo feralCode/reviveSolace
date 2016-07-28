@@ -1,0 +1,110 @@
+var async = require('async');
+var Promise = require('bluebird');
+
+
+/**
+ * @this VDAlert
+ * returns an instance of a VDAlert (Village Defense Alert)
+ * @param{obj} req - http request from client
+ */
+function VDAlert(req) {
+  'use strict';
+  /** @const */
+  var MESSAGE_TYPE_ALERT = 3;
+  var that = this;
+  that.send = send;
+  that.create = create;
+  
+  try {
+    // Required parameters alert message
+    this.geofence_id = req.session.user.geofence_id;
+    this.creator_id = req.session.user.id;
+    this.location = null;
+    this.alertMessage = String(req.body.alertMessage);
+    // Optional parameter location
+    if (req.body.location) {
+      this.location = req.body.location;
+    }
+  }
+  catch(e) {
+    sails.log.error('VDAlert : Failed to create alert.');
+    sails.log.error(e);
+    // if error return
+    return;
+  }
+
+  
+
+  function send() {
+    return User
+        .find({'geofence_id': that.geofence_id})
+        .then(function(users) {
+          TwilioService.sendAlert(users, that.alertMessage, that.location);
+        })
+        .catch(function(e) {
+          sails.log.error('VDAlert : Error finding alert users in db');
+          sails.log.error(e);
+        });
+  }
+
+
+  function create() {
+    return Alert
+        .create({
+          creator_id:   that.creator_id,
+          alertMessage: that.alertMessage,
+          geofence_id:  that.geofence_id,
+          location:     that.location
+        })
+        .catch(function(e) {
+          sails.log.error('VDAlert : Failed to create Alert entry in db');
+          sails.log.error(e);
+        })
+        .then(function() {
+          return Message
+              .create({
+                sender_id:    that.creator_id,
+                geofence_id:  that.geofence_id,
+                message:      that.alertMessage,
+                message_type: MESSAGE_TYPE_ALERT
+              });
+        })
+        .catch(function(e) {
+          sails.log.error('VDAlert : Failed to create Alert Message in db');
+          sails.log.error(e);
+        });
+  }
+
+
+}
+
+
+/**
+ * AlertController
+ * Contains logic for handling alert requests for authorized users.
+ */
+module.exports = {
+
+  create: function(req, res) {
+    // create a new alert object
+    var vdAlert = new VDAlert(req);
+    vdAlert
+        .create()
+        .catch(function(e) {
+          sails.log.error('VDAlert : Failed to send alert');
+          sails.log.error(e);
+        })
+        .then(vdAlert.send)
+        .catch(function(e) {
+          sails.log.error('VDAlert : Failed to send alert');
+          sails.log.error(e);
+        })
+        .finally(function() {
+          return res.send({
+            'success': true,
+            'message': 'Sending alerts to users'
+          });
+        });
+  }
+
+};

@@ -1,0 +1,492 @@
+/** @const */ var Promise = require('bluebird');
+
+
+function getGeofenceByDistance(lat, lng, _maxDistance, _limit) {
+  var limit = _limit || 50; // default max return 50
+  var maxDistance = _maxDistance || 3218.69; //3218.69 m = 2 mi - default max
+  var distanceMultiplier = 6371; // earth's size in 6371km
+  var def = Promise.defer();
+
+  Geofence
+      .native(function(err, collection) {
+        if (err) {
+          sails.log.error('Error running native function on Geofence');
+          sails.log.error(err);
+          return def.reject(err);
+        }
+
+        collection
+            .geoNear(lng, lat, {
+              limit: limit,
+              maxDistance: maxDistance,
+              distanceMultiplier: distanceMultiplier,
+              spherical: true
+            }, function(err, arr) {
+              if (err) {
+                sails.log.error('Error running geonear function on neighbors');
+                sails.log.error(err);
+                return def.reject(err);
+              }
+
+              //sails.log.info('neighbors');
+              //sails.log.info(arr);
+              return def.resolve(arr.results);
+            });
+      });
+
+  return def.promise;
+}
+
+function PointFactory(lat, lng, isRadians) {
+  // Semi-axes of WGS-84 geoidal reference
+  var WGS84_a = 6378137.0; // Major semiaxis [m]
+  var WGS84_b = 6356752.3; // Minor semiaxis [m]
+  var _lat = lat;
+  var _lng = lng;
+  var _isRadians = isRadians || false;
+
+  this.radians = radians;
+  this.degrees = degrees;
+  this.boxByRadius = boxByRadius;
+  this.km2mi = km2mi;
+  this.mi2km = mi2km;
+  return this;
+
+  // return value passed as kilometers as miles
+  function km2mi(lengthKm) {
+    return (length * 0.621371);
+  }
+  // return value passed as miles as kilometers
+  function mi2km(lengthMi) {
+    return (lengthMi * 1.60934);
+  }
+  // returns Ponts Lat and Long as degrees
+  // if lat, lng array is passed it is returned as radian
+  function radians(degreeArr) {
+    var lat = _lat;
+    var lng = _lng;
+    if (_isRadians === true && !degreeArr) {
+      return [lat, lng];
+    }
+    if (degreeArr && degreeArr.length === 2) {
+      lat = degreeArr[0];
+      lng = degreeArr[1];
+    }
+    var x = Math.PI * lat / 180.0;
+    var y = Math.PI * lng / 180.0;
+    return [x, y];
+  }
+  // returns Ponts Lat and Long as degrees
+  // if lat, lng array is passed it is returned as degrees
+  function degrees(radianArr) {
+    var lat = _lat;
+    var lng = _lng;
+    if (!_isRadians && !radianArr) {
+      return [lat, lng];
+    }
+    if (radianArr && radianArr.length === 2) {
+      lat = radianArr[0];
+      lng = radianArr[1];
+    }
+    var x = 180.0 * lat / Math.PI;
+    var y = 180.0 * lng / Math.PI;
+    return [x, y];
+  }
+  // Earth radius at a given latitude, according to the WGS-84 ellipsoid [m]
+  function WGS84EarthRadius(lat) {
+    // http://en.wikipedia.org/wiki/Earth_radius
+    var An = WGS84_a * WGS84_a * Math.cos(lat);
+    var Bn = WGS84_b * WGS84_b * Math.sin(lat);
+    var Ad = WGS84_a * Math.cos(lat);
+    var Bd = WGS84_b * Math.sin(lat);
+    return Math.sqrt((An * An + Bn * Bn) / (Ad * Ad + Bd * Bd));
+  }
+  // returns Ponts Lat and Long as degrees
+  // if lat, lng array is passed it is returned as degrees
+  function boxByRadius(radiusKm) {
+    // Lat/Long in radians
+    var rads = radians();
+    var lat = rads[0];
+    var lng = rads[1];
+    var halfSide = 1000 * radiusKm;
+    // Radius of Earth at given latitude
+    var radius = WGS84EarthRadius(lat);
+    // Radius of the parallel at given latitude
+    var pradius = radius * Math.cos(lat);
+
+    var latMin = lat - halfSide / radius;
+    var latMax = lat + halfSide / radius;
+    var lngMin = lng - halfSide / pradius;
+    var lngMax = lng + halfSide / pradius;
+
+    // log min and max while radians
+    //sails.log.info('latMin', latMin);
+    //sails.log.info('latMax', latMax);
+    //sails.log.info('lngMin', lngMin);
+    //sails.log.info('lngMax', lngMax);
+
+    var p1 = degrees([latMin, lngMin]);
+    var p2 = degrees([latMax, lngMax]);
+    return {
+      latMin: p1[0],
+      latMax: p2[0],
+      lngMin: p1[1],
+      lngMax: p2[1]
+    };
+  }
+}
+
+
+function GeofenceFactory() {
+  function create(_lat, _lng, _radius, _userId, _address) {
+    return Geofence
+        .create({creator_id: _userId, loc: [_lng, _lat], radius: _radius})
+        .then(function aferCreate(geo) {
+          // update user's geofence and address info
+          // set and forget
+          User.update(
+              {
+                geofence_id: geo.id,
+                address: _address,
+                lat: _lat,
+                lng: _lng
+              },
+              {
+                where: {id: _userId}
+              });
+          return geo;
+        });
+  }
+  function get(_id) {
+    return Geofence
+        .findOne({id: _id});
+  }
+  function users(_id) {
+    return User
+        .find({geofence_id: _id});
+  }
+  function getWithUsers(_id) {
+     Geofence
+        .findOne({id: _id})
+        .then(function getUsers(geo) {
+          // Get users by geofence id
+          return User
+              .find({geofence_id: _id})
+              .then(function returnPayload(usrs) {
+                return {
+                  'success': true,
+                  'geofence': geo,
+                  'neighbors': usrs.location()
+                };
+              });
+        });
+  }
+  return {
+    get: get,
+    users: users,
+    getWithUsers: getWithUsers,
+    create: create
+  };
+}
+
+/**
+ * NeighborhoodController
+ *
+ * @description	:: A set of functions called `actions`.
+ * @export      :: Controller
+ *
+ *    Actions contain code telling Sails how to respond to a certain type of request.
+ *                 (i.e. do stuff, then send some JSON, show an HTML page, or redirect to another URL)
+ *
+ *                 You can configure the blueprint URLs which trigger these actions (`config/controllers.js`)
+ *                 and/or override them with custom routes (`config/routes.js`)
+ *
+ *                 NOTE: The code you write here supports both HTTP and Socket.io automatically.
+ *
+ * @docs        :: http://sailsjs.org/#!documentation/controllers
+ */
+
+
+/**
+ * create handler
+ * @param{object} req
+ * @param{object} res
+ * @return{json} json response to client
+ */
+function create(req, res) {
+  if (req.session.user &&
+      req.session.user.id &&
+      req.body.lat &&
+      req.body.lng &&
+      req.body.radius &&
+      req.body.address) {
+    var user_id = req.session.user.id;
+    var lat = parseFloat(req.body.lat);
+    var lng = parseFloat(req.body.lng);
+    var radius = parseFloat(req.body.radius);
+    var address = req.body.address;
+  } else {
+    return res.send({
+      'success': false,
+      'message': 'Error creating neighborhood. Missing parameters'
+    });
+  }
+
+  var neighborhood = GeofenceFactory();
+  // create neighborhood
+  Promise
+      .join(
+      neighborhood.create(lat, lng, radius, user_id, address),
+      User.findOne({id: user_id}),
+      function aferCreate(geo, usr) {
+        // return data to user
+        usr.address = address;
+        usr.geofence_id = geo.id;
+        usr.lat = lat;
+        usr.lng = lng;
+        usr.save();
+
+        return res.send({
+          'success': true,
+          'message': 'Neighborhood created successfully',
+          'geofence': geo,
+          'user': usr
+        });
+      })
+      .catch(function onError(e) {
+        sails.log.error('Error Creating neightborhood ' +
+            'NeightborhoodController.js');
+        sails.log.error(e);
+        //return error to user
+        return res.send({
+          'success': false,
+          'error': e
+        });
+      });
+}
+
+
+/**
+ * getIncidents handler
+ * @param{object} req
+ * @param{object} res
+ * @return{json} json response to client
+ */
+function getIncidents(req , res) {
+  var lat;
+  var lng;
+  var radiusKm;
+  if (req.param('lat') && req.param('lng') && req.param('radius')) {
+    lat = parseFloat(req.param('lat'));
+    lng = parseFloat(req.param('lng'));
+    radiusKm = parseFloat(req.param('radius'));
+  }
+  else {
+    return res.send({
+      'success': false,
+      'message': 'Error retrieving crimes, missing parameters'
+    });
+  }
+  var point = new PointFactory(lat, lng);
+  var boundingBoxObj = point.boxByRadius(radiusKm);
+
+  return IncidentService
+      .get({bounds: boundingBoxObj})
+      .then(function afterQuery(incidents) {
+        //sails.log.info(incidents);
+        return res.json(incidents);
+      });
+}
+
+
+
+/**
+ * get handler
+ * @param{object} req
+ * @param{object} res
+ * @return{json} json response to client
+ */
+function get(req, res) {
+  var geofence_id;
+  if (req.session.user && req.session.user.geofence_id) {
+    geofence_id = req.session.user.geofence_id;
+  }
+  else {
+    return res.send({
+      'success': false,
+      'message': 'Error to retrieving neighborhood. Missing parameters'
+    });
+  }
+
+  var neighborhood = GeofenceFactory();
+  // create neighborhood
+  Promise
+      .join(
+          neighborhood.get(geofence_id),
+          neighborhood.users(geofence_id),
+          function (geo, users) {
+            var cleanUsers =  _.map(users,  function clean(usr) {
+              var filterItems = [
+                'id',
+                'firstname',
+                'lastname',
+                'profile_pic',
+                'lat',
+                'lng',
+                'geofence_id'
+              ];
+              return _.pick(usr, filterItems);
+            });
+
+            return res.send({
+              'success': true,
+              'geofence': geo,
+              'neighbors': cleanUsers
+            });
+          }
+      )
+      .catch(function onError(e) {
+        //return error to user
+        return res.send({
+          'success': false,
+          'message': e.message
+        });
+      });
+}
+
+
+module.exports = {
+  get: get,
+  getavailable: function(req, res) {
+
+    if (req.param('lat') === undefined || req.param('lng') === undefined) {
+      return res.send({
+        'success': false,
+        'message': 'lat, and lng required'
+      });
+    }
+    var lat = parseFloat(req.param('lat'));
+    var lng = parseFloat(req.param('lng'));
+    //max distance to search for neightborhood in meters
+    var maxDistance = 16093.4; //10mi in meters
+    getGeofenceByDistance(lat, lng, maxDistance)
+        .then(function(neighborhood_array) {
+          //sails.log.info('neighborhood array', neighborhood_array);
+          if (neighborhood_array.length == 0) {
+            return res.send({
+              'success': true,
+              'neighborhood_array': []
+            });
+          }
+          else {
+            var n_find_count = 0;
+
+            async.each(neighborhood_array, function(item, callback) {
+
+              User.find({geofence_id: item.id}, function(err, users) {
+                if (err) throw err;
+
+                //item.neigh_count = users.length;
+                item.users = users;
+                callback();
+
+                n_find_count++;
+                if (n_find_count == neighborhood_array.length) {
+                  return res.send({
+                    'success': true,
+                    'neighborhood_array': neighborhood_array
+                  });
+                }
+              });
+            }, function(err) {
+              if (err) throw err;
+            });
+          }
+
+        })
+        .catch(function(e) {
+          return res.send({
+            'success': false,
+            'message': e
+          });
+        });
+
+  },
+  create: create,
+  getIncidents: getIncidents,
+  update: function(req, res) {
+
+    if (req.session.user &&
+        req.session.user.id &&
+        req.param('lat') &&
+        req.param('lng') &&
+        req.param('geofence_id') &&
+        req.param('address')) {
+      var user_id = req.session.user.id;
+      var lat = parseFloat(req.param('lat'));
+      var lng = parseFloat(req.param('lng'));
+      var geofence_id = req.param('geofence_id');
+      var address = req.param('address');
+    }
+    else {
+      return res.send({
+        'success': false,
+        'message': 'Error joining neighborhood. Missing parameters'
+      });
+    }
+
+
+
+    User.findOne({id: user_id}, function(err, user) {
+      if (err) {
+        sails.log.error(err);
+        return res.send({
+          'success': false,
+          'message': err
+        });
+      } else if (!user) {
+        sails.log.error('user not present');
+        return res.send({
+          'success': false,
+          'message': 'Invalid user'
+        });
+      } else {
+        Geofence.findOne({id: geofence_id}, function(err, neighborhood) {
+          if (err) {
+            return res.send({
+              'success': false,
+              'message': err
+            });
+          } else if (!neighborhood) {
+            return res.send({
+              'success': false,
+              'message': 'no existing neighborhood'
+            });
+          } else {    // update existing one
+            user.address = address;
+            user.geofence_id = neighborhood.id;
+            user.lat = lat;
+            user.lng = lng;
+            user.save()
+                .then(function(user) {
+
+                  if (user) {
+                    return res.send({
+                      'success': true,
+                      'message': 'user added to neighborhood successfully',
+                      'user': user,
+                      'geofence': neighborhood
+                    });
+                  } else {
+                    return res.send({
+                      'success': false,
+                      'message': 'failed to add user to neightborhood'
+                    });
+                  }
+                });
+          }
+        });
+      }
+    });
+  }
+};

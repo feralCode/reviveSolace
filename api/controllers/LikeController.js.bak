@@ -1,0 +1,99 @@
+/**
+ * Like Controller
+ *
+ * @module		:: Controller
+ * @description	:: Contains logic for handling requests to like and dislike comments.
+ */
+
+//var pushService = require('../services/PushService');
+var _ = require('lodash');
+
+function sendPushToCommenter() {
+  // find user who made post and send push notifcation to them
+  /*
+   User.find({geofence_id:geofence_id}, function(err, users) {
+
+   if (err) return res.send({
+   "success": false,
+   "message": err
+   });
+
+   // _.each(users, function(user) {
+   //     console.log('user : '+ user.email + ' with code : ' + user.code);
+   // });
+
+   pushService.push(req.session.user, users, user_id + ": [Image]" , profile_pic, message);;
+
+   return res.send({
+   "success": true,
+   "message": message.toObject()
+   });
+   });
+   */
+}
+
+module.exports = {
+  like: function(req, res) {
+
+    var message_id = req.body.message_id;
+    var user_id = req.session.user_id;
+
+    // if user has not already liked comment then create new like
+    Like.findOne({'user_id' : user_id, 'message_id' : message_id}, function(err, like) {
+      if (err) return res.send({
+        'success': false,
+        'message': err
+      });
+
+      if (!like) {
+        // Create like since none was found
+        Like.create({'user_id': user_id, 'message_id' : message_id}, function(err, result) {
+
+          if (err) return res.send({
+            'success': false,
+            'message': err
+          });
+
+          // publish updated message on socket connection
+          Message.publishAdd(message_id, 'likes', result.id);
+
+          return res.send({
+            'success': true,
+            'like': result
+          });
+
+        });
+
+      } else {
+        return res.send({
+          'success': false,
+          'message': 'This user already liked this message'
+        });
+      }
+
+    });
+  },
+
+  dislike: function(req, res) {
+
+    var message_id = req.body.message_id;
+    var user_id = req.session.user_id;
+
+    Like.destroy({'user_id' : user_id, 'message_id': message_id}, function(err, result) {
+      if (err) return res.send({
+        'success': false,
+        'message': err
+      });
+
+      // publish updated message on socket connection
+      Message.publishRemove(message_id, 'likes', result.id);
+
+      return res.send({
+        'success': true,
+        'like': result
+      });
+
+    });
+
+  }
+};

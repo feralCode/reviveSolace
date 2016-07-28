@@ -1,0 +1,312 @@
+/**
+ * MessageController
+ *
+ */
+var Q = require('bluebird');
+
+
+/**
+  * getMessagesByGeofenceId - get messages in neightborhood chat
+  * @param  {string} geofence_id
+  * @return {Q.Promise}
+  */
+function getMessagesByGeofenceId(geofence_id) {
+  var def = Q.defer();
+
+  if (!geofence_id) {
+    def.resolve([]);
+  }
+
+  Message.find({geofence_id: geofence_id})
+      .populate('likes')
+      .exec(function(err, messages) {
+        if (err) {
+          def.reject(new Error(err));
+        }
+        else if (!messages || messages.length === 0) {
+          def.resolve([]);
+        } else {
+          def.resolve(messages);
+        }
+      });
+
+  return def.promise;
+}
+
+function resetBadgeCountByUserId(userId) {
+  // on error function for badge reset
+  function onError(e) {
+    sails.log.error('MessageController.js: Error while reseting user badge count');
+    sails.log.error(e);
+  }
+  // return user as json after user update
+  function onUpdate(user) {
+    //return res.json(user);
+  }
+  // set badge count to 0 for current user
+  User
+      .update({id: userId}, {badge_count: 0})
+      .then(onUpdate)
+      .catch(onError);
+}
+
+
+/**
+ * get users by geofence of message
+ * @param  {string} geofence_id
+ * @return {Q.Promise}
+ */
+function getUsersByGeonfenceId(geofence_id) {
+  return User.find({geofence_id: geofence_id});
+}
+
+
+function runTimeTest() {
+
+  function getAdminUsers() {
+    var adminUserIds = [
+      '5651142eb2efb8413173b02c',
+      '5716c3ba5330ab7424c9c85a',
+      '5650fa421e6d8a4cd97ab1be',
+      '5650fa421e6d8a4cd97ab1bf'
+    ];
+    return User.find({id :adminUserIds});
+  }
+
+  getAdminUsers()
+      .then(function iterator(notifyUsers) {
+        sails.log.info('Testing push notificaitons');
+        var pushTitle = 'VDefense Test Service';
+        var pushMessage = 'Test push notification badge(10)';
+        var testAndroidUsers = [];
+        var testIosUsers = [];
+
+        _.each(notifyUsers, function(user) {
+          // increment user badge count
+          user.badge_count = 10;
+          user.save();
+          // strip out only necessary fields for users
+          var fieldsToPick = [
+            'chat_push_enabled',
+            'badge_count',
+            'androidPushId',
+            'applePushId'
+          ];
+          var tempUsr = _.pick(user, fieldsToPick);
+          sails.log.info(tempUsr);
+          if (tempUsr.androidPushId) {
+            testAndroidUsers.push(tempUsr);
+          }
+          if (tempUsr.applePushId) {
+            testIosUsers.push(tempUsr);
+          }
+        });
+        // send out test push notifications
+        sails.log.info('testAndroidUsers', testAndroidUsers);
+        sails.log.info('testIosUsers', testIosUsers);
+        GcmService.notification(testAndroidUsers, pushTitle, pushMessage);
+        ApnService.notification(testIosUsers, pushTitle, pushMessage);
+      });
+}
+
+
+/**
+ * sendNotifcations Function to send out notificaitons to users
+ * @param  {object} fromUserObj
+ * @param  {object} messageObj
+ */
+function sendNotifcations(fromUserObj, messageObj) {
+  sails.log.info('sendNotifcations() called');
+
+  getUsersByGeonfenceId(fromUserObj.geofence_id)
+      .then(function iterator(notifyUsers) {
+        var TITLE = 'Village Defense';
+        var MESSAGE_TYPE_TEXT = 1;
+        var MESSAGE_TYPE_IMAGE = 2;
+        var MESSAGE_TYPE_ALERT = 3;
+
+        var androidUsers = [];
+        var iosUsers = [];
+
+        function getPushMessage() {
+          if (messageObj.message_type === MESSAGE_TYPE_TEXT) {
+            if (fromUserObj.firstname) {
+              return String(fromUserObj.firstname) + ': ' + String(messageObj.message);
+            }
+            else {
+              return messageObj.message;
+            }
+          }
+          else if (messageObj.message_type === MESSAGE_TYPE_IMAGE) {
+            if (fromUserObj.firstname) {
+              return String(fromUserObj.firstname) + ' added a new picture in chat';
+            }
+            else {
+              return'New picture in chat';
+            }
+          }
+          else if (messageObj.message_type === MESSAGE_TYPE_ALERT) {
+            return 'ALERT';
+          }
+          else {
+            return 'Notification';
+          }
+        }
+
+        _.each(notifyUsers, function(user) {
+          // increment user badge count
+          //user.badge_count = user.badge_count + 1;
+          user.badge_count = 0;
+          user.save();
+          // strip out only necessary fields for users
+          var fieldsToPick = [
+            'chat_push_enabled',
+            'badge_count',
+            'androidPushId',
+            'applePushId'
+          ];
+          var tempUsr = _.pick(user, fieldsToPick);
+          sails.log.info(tempUsr);
+          if (tempUsr.androidPushId) {
+            androidUsers.push(tempUsr);
+          }
+          if (tempUsr.applePushId) {
+            iosUsers.push(tempUsr);
+          }
+        });
+        // send out push notifications
+        sails.log.info('androidUsers', androidUsers);
+        GcmService.notification(androidUsers, TITLE, getPushMessage());
+        sails.log.info('iosTokens', iosUsers);
+        ApnService.notification(iosUsers, TITLE, getPushMessage());
+
+
+        var notifyCount = notifyUsers.length;
+        var androidCount = androidUsers.length;
+        var iosCount = iosUsers.length;
+        var pushPercentage =  parseInt((androidCount + iosCount) / notifyCount  * 100);
+
+        sails.log.info('Message sent from ' + fromUserObj.firstname + ' ' + fromUserObj.lastname);
+        sails.log.info('notifyCount ' + notifyCount);
+        sails.log.info('androidCount ' + androidCount);
+        sails.log.info('iosCount ' + iosCount);
+        sails.log.info('Push percentage ' + pushPercentage + '%');
+
+        // send out sms to team members if push percentage below 90
+        if (pushPercentage < 90) {
+          var phone_numbers = ['6785574795', '6786414431'];
+          var adminMessage = fromUserObj.firstname + ' ' + fromUserObj.lastname +
+              ' sent a message and success rate was ' +
+              pushPercentage + '%' +
+              ' geofence_id ' + fromUserObj.geofence_id +
+              ' message ' + messageObj.message;
+          TwilioService.alertAdmins(phone_numbers, adminMessage);
+        }
+
+      })
+      .catch(function(e) {
+        sails.log.error('notificationFactory Error - MessageController.js');
+        sails.log.error(e);
+        return res.send({
+          'success': false,
+          'message': error
+        });
+      });
+
+}
+
+
+/**
+  * Handle message/chat creataion and subscription
+  * @export :: module.export
+  * Contains logic for handling requests
+  * @return {object} create
+  * @return {object} findmessagesbycode
+  */
+
+module.exports = {
+
+  runTimeTest: runTimeTest,
+
+
+  create: function(req, res) {
+    var sessionUser, message, message_type, geofence_id, user_id;
+    try {
+      sessionUser = req.session.user;
+      //sails.log.info('sessionUser', sessionUser);
+      user_id = sessionUser.id;
+      geofence_id = sessionUser.geofence_id;
+      message = req.body.message;
+      message_type = parseInt(req.body.message_type);
+
+      var messageObj = {
+        sender_id: user_id,
+        geofence_id: geofence_id,
+        message: message,
+        message_type: message_type
+      };
+    }
+    catch (e) {
+      return res.send({
+        'success': false,
+        'message': e
+      });
+    }
+
+    // send notificaitons to users for message
+    sendNotifcations(sessionUser, messageObj);
+
+    // create message in DB
+    Message
+        .create({
+          sender_id: user_id,
+          geofence_id: geofence_id,
+          message: message,
+          message_type: message_type
+        })
+        .then(function publishToClients(messageRes){
+          // publish message to all clients on websocket
+          Message.publishCreate(messageRes);
+        })
+        .then(function() {
+          return res.send({
+            'success': true
+          });
+        })
+        .catch(function(e) {
+          sails.log.error('MessageController.create() Error');
+          sails.log.error(e);
+          return res.send({
+            'success': false,
+            'message': error
+          });
+        });
+  },
+
+  findmessagesbycode: function(req, res) {
+    var geofence_id = null;
+    // subscribe client to model changes
+    if (req.isSocket && req.session.user) {
+      Message.watch(req);
+      sails.log.info('User subscribed to ' + req.socket.id);
+    }
+    // reset badge count for user
+    resetBadgeCountByUserId(req.session.user.id);
+    geofence_id = req.session.user.geofence_id;
+
+    Message.find({geofence_id: geofence_id})
+        .populate('likes')
+        .then(function(messages) {
+          return res.send({
+            'success': true,
+            'messages': messages
+          });
+        })
+        .catch(function(error) {
+          return res.send({
+            'success': false,
+            'message': error
+          });
+        });
+  }
+};

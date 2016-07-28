@@ -1,2 +1,3 @@
-# reviveSolace
-reviveV2 backened
+# villagedefense-server2
+
+a [Sails](http://sailsjs.org) application

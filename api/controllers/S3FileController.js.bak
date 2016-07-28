@@ -1,0 +1,271 @@
+/** @const */ var fs = require('fs');
+///** @const */ var skipperS3 = require('skipper-s3');
+/** @const */ var AWS = require('aws-sdk');
+/** @const */ var gm = require('gm');
+/** @const */ var Promise = require('bluebird');
+
+/** @const */ var FILE_TYPE_CHAT = 1;
+/** @const */ var MESSAGE_TYPE_IMAGE = 2;
+/** @const */ var FILE_TYPE_PROFILE = 2;
+
+//var FILE_TYPE_MISC = 3;
+
+/** @const */ var URL_PREFIX = 'https://s3.amazonaws.com/';
+
+AWS.config.update({
+  accessKeyId: sails.config.amazonS3.key,
+  secretAccessKey: sails.config.amazonS3.secret
+});
+
+
+/**
+  * returns file extension
+  * @param  {string} fileName
+  * @return {string} fileExtension
+  */
+function fileExtension(fileName) {
+  return fileName.split('.').slice(-1);
+}
+
+
+/**
+  * returns random 40 character file name
+  * @param  {object} req - Parameters for request
+  * @return {string} filename
+  */
+function createFileName(req) {
+  var def = Promise.defer();
+  console.log('req in side createFileName',
+      req.file('image')._files[0].stream.filename);
+  var file = req.file('image')._files[0].stream;
+  var ext = fileExtension(file.filename);
+  var fileName = '';
+  var possible = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' +
+      'abcdefghijklmnopqrstuvwxyz' +
+      '0123456789';
+  for (var i = 0; i < 32; i++) {
+    var ranNum = Math.random();
+    fileName += possible.charAt(Math.floor(ranNum * possible.length));
+  }
+  //add data to end of file name
+  fileName += Date.now();
+  //file extension
+  file.filename = fileName + '.' + ext;
+  def.resolve(req);
+  return def.promise;
+}
+
+
+/**
+  *
+  * @param  {object} imagePath
+  * @return {Promise}
+  */
+function resizeImage(imagePath) {
+  var def = Promise.defer();
+  if (!imagePath) {
+    def.reject();
+  }
+  gm(imagePath).resize(500, 500).autoOrient()
+      .write(writeStream, function(err) {
+        if (err) {
+          def.reject(err);
+        }
+        def.resolve(imagePath);
+      });
+  return def.promise;
+}
+
+
+/**
+  * ---
+  * @param  {object} req
+  * @return {Promise.Promise}
+  */
+function createDbRecord(req) {
+  var def = Promise.defer();
+  var files_type = req.param('file_type');
+  var user_id = req.session.user.id;
+  var geofence_id = req.session.user.geofence_id;
+  var file_url = req.vd_upload_file_url;
+
+  if (files_type == FILE_TYPE_CHAT) {
+    S3File.create({
+      owner_id: user_id,
+      file_url: file_url,
+      file_type: ''
+    }, function(err, fileRecord) {
+      // TODO: FIX RACE CONDITION DOESN'T MATTER FOR NOW
+      if (err) {
+        def.reject(err);
+      }
+
+      def.resolve(file_url);
+      /*Message.create({
+        sender_id: user_id,
+        geofence_id: geofence_id,
+        message: file_url,
+        message_type: MESSAGE_TYPE_IMAGE
+      }, function(err, msgRecord) {
+        if (err) {
+          def.reject(err);
+        }
+        def.resolve(file_url);
+      });*/
+
+    });
+
+  }
+  else if (files_type == FILE_TYPE_PROFILE) {
+    req.session.user.profile_pic = file_url;
+    User.update({id: user_id}, {profile_pic: file_url})
+        .exec(function afterwards(err, user) {
+          if (err) {
+            def.reject(err);
+          }
+          def.resolve(file_url);
+        });
+  }
+  else {
+    def.reject();
+  }
+  return def.promise;
+}
+
+
+/**
+  * ---
+  * @param  {object} req
+  * @return {Promise.Promise}
+  */
+/*
+function uploadImage(req) {
+  var def = Promise.defer();
+  console.log('req in side uploadImage',
+      req.file('image')._files[0].stream.filename);
+  var fileType = req.param('file_type');
+  var uploadOptions = {
+    adapter: skipperS3,
+    key: sails.config.amazonS3.key,
+    secret: sails.config.amazonS3.secret
+  };
+  if (fileType == FILE_TYPE_CHAT) {
+    uploadOptions.bucket = sails.config.amazonS3.chatMediaBucket;
+  }
+  else if (fileType == FILE_TYPE_PROFILE) {
+    // NO ACCESS TO S3 RN
+    //uploadOptions.bucket = sails.config.amazonS3.profilePicBucket;
+    uploadOptions.bucket = sails.config.amazonS3.chatMediaBucket;
+  } else {
+    def.reject(err);
+  }
+  var afterUpload = function(err, filesUploaded) {
+    if (err) {
+      def.reject(err);
+    }
+    var file_name = req.file('image')._files[0].stream.filename;
+    req.vd_upload_file_url = (URL_PREFIX +
+        sails.config.amazonS3.chatMediaBucket + '/' + file_name);
+    def.resolve(req);
+  };
+
+  req.file('image').upload(uploadOptions, afterUpload);
+  return def.promise;
+}*/
+
+
+/**
+  * ---
+  * @param  {object} req
+  * @return {Promise.Promise}
+  */
+function uploadImage(req) {
+  var def = Promise.defer();
+  var uploadedData = null;
+  console.log('req in side uploadImage',
+      req.file('image')._files[0].stream.filename);
+  var file_name = req.file('image')._files[0].stream.filename;
+  req.vd_upload_file_url = (URL_PREFIX +
+      sails.config.amazonS3.chatMediaBucket + '/' + file_name);
+
+  // download locally then push to aws
+  req.file('image').upload(function(err, uploadedFiles) {
+    if (err) {
+      def.reject(err);
+    }
+    if (uploadedFiles && uploadedFiles[0] && uploadedFiles[0].fd) {
+      uploadedData = uploadedFiles[0].fd;
+    } else {
+      def.reject();
+    }
+    // read from disk
+    fs.readFile(uploadedData, function(err, data) {
+      if (err) {
+        def.reject(err);
+      }
+      var s3 = new AWS.S3();
+      var request = s3.putObject({
+        ACL: 'public-read',
+        Bucket: sails.config.amazonS3.chatMediaBucket,
+        Key: file_name,
+        Body: data,
+        ContentType: 'image/jpg'
+      }, function(err, response) {
+        if (err) {
+          def.reject(err);
+        }
+        def.resolve(req);
+      });
+
+    });
+  });
+  return def.promise;
+}
+
+
+function onFailure(req) {
+
+}
+
+
+/**
+  * Handle image uploads for profile pictures or chat uploads
+  *         file is directly uploaded to AWS S3
+  * @export :: module.export
+  * Contains logic for handling requests
+  * @return {object} create
+  */
+module.exports = {
+
+  create: function(req, res) {
+    if (req.file && req.param('file_type')) {
+      //console.log('req.file("image")', req.file('image')._files[0].stream);
+      createFileName(req)
+          .then(uploadImage)
+          .then(createDbRecord)
+          .then(function(fileUrl) {
+            console.log('image uploaded successfully');
+            return res.send({
+              'success': true,
+              'message': 'image uploaded successfully',
+              'user': req.session.user,
+              'image': fileUrl
+            });
+          })
+          .catch(function(error) {
+            console.log(error);
+            return res.send({
+              'success': false,
+              'message': error
+            });
+          });
+    } else {
+      console.log('Failed to upload. files_type missing.');
+      return res.send({
+        'success': false,
+        'message': 'Failed to upload. files_type missing.'
+      });
+    }
+  }
+
+};
